@@ -1,4 +1,4 @@
-name: Build Ghost Chat APK from uploaded ZIP
+name: Build Ghost Chat APK
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
   build-debug-apk:
     name: Build installable debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
       - name: Checkout repository
@@ -19,6 +19,7 @@ jobs:
       - name: Find and extract uploaded project ZIP
         shell: bash
         run: |
+          set -euo pipefail
           ZIP_FILE="GhostChat-Upload.zip"
           if [ ! -f "$ZIP_FILE" ]; then
             echo "ERROR: $ZIP_FILE was not found in the repository root."
@@ -28,41 +29,79 @@ jobs:
           fi
           mkdir -p source
           unzip -q "$ZIP_FILE" -d source
-          test -f source/app/build.gradle.kts || { echo "ERROR: ZIP does not contain app/build.gradle.kts at its root."; find source -maxdepth 4 -type f | head -100; exit 1; }
-          test -f source/build.gradle.kts || { echo "ERROR: ZIP does not contain build.gradle.kts at its root."; exit 1; }
-          test -f source/settings.gradle.kts || { echo "ERROR: ZIP does not contain settings.gradle.kts at its root."; exit 1; }
+          if [ ! -f source/app/build.gradle.kts ] || [ ! -f source/build.gradle.kts ] || [ ! -f source/settings.gradle.kts ]; then
+            echo "ERROR: The ZIP must have app/, build.gradle.kts, and settings.gradle.kts at its root."
+            find source -maxdepth 4 -type f | head -100
+            exit 1
+          fi
           echo "Project ZIP extracted successfully."
 
-      - name: Upgrade Kotlin compiler to match Firebase SDK metadata
+      - name: Align Kotlin compiler with Firebase SDK metadata
         working-directory: source
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
+
           root = Path('.')
+          target = '2.2.21'
           candidates = list(root.rglob('*.gradle.kts')) + list(root.rglob('*.gradle')) + list(root.rglob('*.toml'))
-          changed = []
+          candidates = [p for p in candidates if 'build' not in p.parts and '.gradle' not in p.parts]
+          updated_files = []
+          found_kotlin_version_declaration = False
+
+          # Fix explicit Gradle Kotlin plugin declarations regardless of whether they currently
+          # say 2.0.21, 2.2.21, or another version. If already correct, this remains a no-op.
+          direct_patterns = [
+              re.compile(r'((?:id|kotlin)\s*\(\s*["\'](?:org\.jetbrains\.kotlin\.(?:android|plugin\.compose|jvm|multiplatform|plugin\.serialization)|android|jvm|multiplatform)["\']\s*\)\s*version\s*["\'])[^"\']+(["\'])'),
+              re.compile(r'(id\s+["\']org\.jetbrains\.kotlin\.(?:android|plugin\.compose|jvm|multiplatform|plugin\.serialization)["\']\s+version\s+["\'])[^"\']+(["\'])'),
+          ]
+
           for path in candidates:
-              # Firebase Auth 25.x is published with Kotlin metadata 2.2.0.
-              # The previous project compiler was Kotlin 2.0.21 (metadata 2.0.0),
-              # so align the Kotlin Android and Compose compiler plugins to 2.3.21, compatible with the project build tools.
-              text = path.read_text(encoding='utf-8')
-              updated = text.replace('2.0.21', '2.3.21')
-              if updated != text:
-                  path.write_text(updated, encoding='utf-8')
-                  changed.append(str(path))
-          if not changed:
-              print('Could not find the expected Kotlin version 2.0.21 in Gradle files.')
-              for path in candidates:
-                  text = path.read_text(encoding='utf-8')
-                  lines = [line.strip() for line in text.splitlines() if 'kotlin' in line.lower() or '2.0.' in line]
-                  if lines:
-                      print(f'--- {path} ---')
-                      print('\n'.join(lines[:30]))
-              raise SystemExit('Kotlin version patch was not applied; build stopped to avoid using an incompatible compiler.')
-          print('Updated Kotlin plugin/compiler version to 2.3.21 in:')
-          for path in changed:
-              print(f' - {path}')
+              original = path.read_text(encoding='utf-8')
+              text = original
+              for pattern in direct_patterns:
+                  text, count = pattern.subn(lambda m: m.group(1) + target + m.group(2), text)
+                  found_kotlin_version_declaration |= count > 0
+
+              # Handle Gradle version catalogs such as [versions] kotlin = "2.0.21"
+              # and kotlin-android = "...". Update only keys explicitly containing "kotlin".
+              if path.name.endswith('.toml'):
+                  section = ''
+                  rebuilt = []
+                  for line in text.splitlines(keepends=True):
+                      section_match = re.match(r'^\s*\[([^]]+)\]', line)
+                      if section_match:
+                          section = section_match.group(1).strip().lower()
+                      if section == 'versions':
+                          version_match = re.match(r'^(\s*([A-Za-z0-9_.-]*kotlin[A-Za-z0-9_.-]*)\s*=\s*)["\']([^"\']+)(["\'].*)$', line, re.IGNORECASE)
+                          if version_match:
+                              found_kotlin_version_declaration = True
+                              line = version_match.group(1) + '"' + target + '"' + line[version_match.start(4) + 1:]
+                      rebuilt.append(line)
+                  text = ''.join(rebuilt)
+
+              if text != original:
+                  path.write_text(text, encoding='utf-8')
+                  updated_files.append(str(path))
+
+          # Print every Kotlin plugin/version-catalog declaration for visibility. The task must
+          # not fail merely because a project was already using 2.2.21 (the previous workflow did).
+          relevant_lines = []
+          for path in candidates:
+              for line_number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+                  if 'org.jetbrains.kotlin' in line or (path.name.endswith('.toml') and 'kotlin' in line.lower()):
+                      relevant_lines.append(f'{path}:{line_number}: {line.strip()}')
+          if updated_files:
+              print('Kotlin declarations normalized to', target, 'in:')
+              for name in updated_files:
+                  print(' -', name)
+          else:
+              print('No textual Gradle edits were needed; checking declarations as stored.')
+          print('\n'.join(relevant_lines[:80]))
+          if not found_kotlin_version_declaration and not relevant_lines:
+              raise SystemExit('Could not locate a Kotlin Gradle plugin declaration. Please check the ZIP project structure.')
           PY
 
       - name: Set up Java 17
@@ -101,7 +140,7 @@ jobs:
           if not config['databaseUrl'].startswith('https://'):
               raise SystemExit('Firebase database URL must use HTTPS')
           json.loads(Path('firebase/database.rules.json').read_text())
-          print('Firebase config and database rules JSON are valid.')
+          print('Firebase config and database Rules JSON are valid.')
           PY
 
       - name: Build Ghost Chat debug APK
