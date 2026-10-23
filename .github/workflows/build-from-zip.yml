@@ -33,14 +33,44 @@ jobs:
           test -f source/settings.gradle.kts || { echo "ERROR: ZIP does not contain settings.gradle.kts at its root."; exit 1; }
           echo "Project ZIP extracted successfully."
 
+      - name: Upgrade Kotlin compiler to match Firebase SDK metadata
+        working-directory: source
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          root = Path('.')
+          candidates = list(root.rglob('*.gradle.kts')) + list(root.rglob('*.gradle')) + list(root.rglob('*.toml'))
+          changed = []
+          for path in candidates:
+              # Firebase Auth 25.x is published with Kotlin metadata 2.2.0.
+              # The previous project compiler was Kotlin 2.0.21 (metadata 2.0.0),
+              # so align the Kotlin Android and Compose compiler plugins to 2.3.21, compatible with the project build tools.
+              text = path.read_text(encoding='utf-8')
+              updated = text.replace('2.0.21', '2.3.21')
+              if updated != text:
+                  path.write_text(updated, encoding='utf-8')
+                  changed.append(str(path))
+          if not changed:
+              print('Could not find the expected Kotlin version 2.0.21 in Gradle files.')
+              for path in candidates:
+                  text = path.read_text(encoding='utf-8')
+                  lines = [line.strip() for line in text.splitlines() if 'kotlin' in line.lower() or '2.0.' in line]
+                  if lines:
+                      print(f'--- {path} ---')
+                      print('\n'.join(lines[:30]))
+              raise SystemExit('Kotlin version patch was not applied; build stopped to avoid using an incompatible compiler.')
+          print('Updated Kotlin plugin/compiler version to 2.3.21 in:')
+          for path in changed:
+              print(f' - {path}')
+          PY
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # Important: v3 attempted to install Google's retired SDK package named "tools".
-      # v4 no longer requests that retired package. Explicitly request only platform-tools.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
