@@ -114,6 +114,29 @@ jobs:
           echo "--- OverlayService.kt lines 270-295 ---"
           sed -n '270,295p' "$F"
 
+      - name: Migrate kotlinOptions to compilerOptions
+        working-directory: source
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('app/build.gradle.kts')
+          t = p.read_text(encoding='utf-8')
+          t = re.sub(r'kotlinOptions\s*\{[^}]*\}', '', t)
+          if 'compilerOptions' not in t:
+              t += '''
+
+          kotlin {
+              compilerOptions {
+                  jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+              }
+          }
+          '''
+          p.write_text(t, encoding='utf-8')
+          print(t)
+          PY
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -131,10 +154,10 @@ jobs:
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      - name: Set up Gradle 8.13
+      - name: Set up Gradle 8.14.4
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.13'
+          gradle-version: '8.14.4'
 
       - name: Validate Firebase config and database rules
         working-directory: source
