@@ -1,4 +1,4 @@
-name: Build Ghost Chat APK
+name: Build Ghost Chat APK from uploaded ZIP
 
 on:
   workflow_dispatch:
@@ -7,48 +7,80 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  build-debug-apk:
+    name: Build installable debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
-      - name: Download repository files
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract Ghost Chat ZIP
+      - name: Find and extract uploaded project ZIP
+        shell: bash
         run: |
-          test -f GhostChat-Upload.zip
+          ZIP_FILE="GhostChat-Upload.zip"
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: $ZIP_FILE was not found in the repository root."
+            echo "Repository files:"
+            ls -la
+            exit 1
+          fi
           mkdir -p source
-          unzip -q GhostChat-Upload.zip -d source
-          test -f source/app/build.gradle.kts
-          test -f source/build.gradle.kts
+          unzip -q "$ZIP_FILE" -d source
+          test -f source/app/build.gradle.kts || { echo "ERROR: ZIP does not contain app/build.gradle.kts at its root."; find source -maxdepth 4 -type f | head -100; exit 1; }
+          test -f source/build.gradle.kts || { echo "ERROR: ZIP does not contain build.gradle.kts at its root."; exit 1; }
+          test -f source/settings.gradle.kts || { echo "ERROR: ZIP does not contain settings.gradle.kts at its root."; exit 1; }
+          echo "Project ZIP extracted successfully."
 
-      - name: Install Java 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+      # Important: v3 attempted to install Google's retired SDK package named "tools".
+      # v4 no longer requests that retired package. Explicitly request only platform-tools.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
-      - name: Install Android build tools
+      - name: Install Android platform and build tools
         run: |
           sdkmanager --install \
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      - name: Install Gradle 8.13
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
 
-      - name: Build Ghost Chat APK
+      - name: Validate Firebase config and database rules
+        working-directory: source
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          config = json.loads(Path('app/src/main/assets/firebase-config.json').read_text())
+          required = {'apiKey', 'appId', 'projectId', 'databaseUrl', 'senderId'}
+          missing = required - set(config)
+          if missing:
+              raise SystemExit(f'Missing Firebase config keys: {sorted(missing)}')
+          if not config['databaseUrl'].startswith('https://'):
+              raise SystemExit('Firebase database URL must use HTTPS')
+          json.loads(Path('firebase/database.rules.json').read_text())
+          print('Firebase config and database rules JSON are valid.')
+          PY
+
+      - name: Build Ghost Chat debug APK
         working-directory: source
         run: gradle --no-daemon --stacktrace :app:assembleDebug
 
       - name: Verify APK signature
         run: |
+          test -f source/app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
             verify --verbose \
             source/app/build/outputs/apk/debug/app-debug.apk
